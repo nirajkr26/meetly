@@ -1,0 +1,56 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             Int            @id @default(autoincrement())
+  email          String         @unique
+  name           String?
+  timezone       String         @default("UTC")
+  createdAt      DateTime       @default(now())
+  eventTypes     EventType[]
+  availabilities Availability[]
+}
+
+model EventType {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String    @unique
+  description String?
+  duration    Int       // in minutes
+  createdAt   DateTime  @default(now())
+  bookings    Booking[]
+}
+
+model Availability {
+  id        Int    @id @default(autoincrement())
+  userId    Int
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dayOfWeek Int    // 0 (Sunday) to 6 (Saturday)
+  startTime String // "HH:MM"
+  endTime   String // "HH:MM"
+}
+
+model Booking {
+  id                 Int       @id @default(autoincrement())
+  eventTypeId        Int
+  eventType          EventType @relation(fields: [eventTypeId], references: [id], onDelete: Cascade)
+  inviteeName        String
+  inviteeEmail       String
+  startTime          DateTime  // UTC
+  endTime            DateTime  // UTC
+  status             String    @default("BOOKED") // "BOOKED" or "CANCELLED"
+  cancellationReason String?
+  createdAt          DateTime  @default(now())
+
+  @@unique([eventTypeId, startTime]) // Prevent double booking of the same slot
+}
