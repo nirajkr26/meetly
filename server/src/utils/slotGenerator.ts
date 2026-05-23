@@ -1,5 +1,6 @@
 import { format, addMinutes, isBefore, isAfter } from "date-fns";
 import { TZDate } from "@date-fns/tz";
+import { getBlockedInterval, intervalsOverlap } from "./bookingHelpers";
 
 interface TimeSlot {
   startTime: string; // ISO String UTC
@@ -10,13 +11,6 @@ interface TimeSlot {
 /**
  * Generates available time slots for a given date, event duration, admin availability, and booked meetings.
  * Handles admin timezone offsets and checks against existing bookings.
- * 
- * @param dateStr "YYYY-MM-DD"
- * @param durationInMinutes Duration of the meeting (e.g. 15, 30, 60)
- * @param adminTimezone Timezone of the admin (e.g. "Asia/Kolkata")
- * @param availability Day availability e.g. { startTime: "09:00", endTime: "17:00" }
- * @param bookedMeetings Array of already booked meetings with startTime and endTime in UTC
- * @param inviteeTimezone Timezone requested by the booking page (e.g. "UTC" or "America/New_York")
  */
 
 export function generateAvailableSlots(
@@ -25,7 +19,8 @@ export function generateAvailableSlots(
   adminTimezone: string,
   availability: { startTime: string; endTime: string } | null,
   bookedMeetings: Array<{ startTime: Date; endTime: Date }>,
-  inviteeTimezone: string = "UTC"
+  inviteeTimezone: string = "UTC",
+  bufferMinutes: number = 0
 ): TimeSlot[] {
   if (!availability) return [];
 
@@ -57,18 +52,24 @@ export function generateAvailableSlots(
     const slotStartUTC = currentSlotStart;
     const slotEndUTC = currentSlotEnd;
 
-    // 1. Skip if slot is in the past
+    // Skip if slot is in the past
     if (isBefore(slotStartUTC, now)) {
       currentSlotStart = currentSlotEnd as TZDate;
       continue;
     }
 
-    // 2. Check overlap with booked meetings
+    // 2. Check overlap with booked meetings (including buffer padding)
     const isBooked = bookedMeetings.some((booking) => {
-      // Overlap formula: SlotStart < BookingEnd AND SlotEnd > BookingStart
-      return (
-        isBefore(slotStartUTC, booking.endTime) &&
-        isAfter(slotEndUTC, booking.startTime)
+      const blocked = getBlockedInterval(
+        booking.startTime,
+        booking.endTime,
+        bufferMinutes
+      );
+      return intervalsOverlap(
+        slotStartUTC,
+        slotEndUTC,
+        blocked.start,
+        blocked.end
       );
     });
 

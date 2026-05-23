@@ -1,7 +1,14 @@
 import { type Request, type Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { createEventTypeSchema } from "../utils/validations";
+import { parseCustomQuestions } from "../utils/bookingHelpers";
 
+function mapEventTypeResponse(eventType: { customQuestions: unknown; [key: string]: unknown; }) {
+  return {
+    ...eventType,
+    customQuestions: parseCustomQuestions(eventType.customQuestions),
+  };
+}
 
 // GET /api/event-types
 export const getEventTypes = async (req: Request, res: Response): Promise<void> => {
@@ -17,8 +24,8 @@ export const getEventTypes = async (req: Request, res: Response): Promise<void> 
       orderBy: { createdAt: "desc" },
     });
 
-    res.json(eventTypes);
-  } catch (error: any) {
+    res.json(eventTypes.map(mapEventTypeResponse));
+  } catch (error: unknown) {
     console.error("Error fetching event types:", error);
     res.status(500).json({ error: "Failed to fetch event types" });
   }
@@ -35,13 +42,14 @@ export const createEventType = async (req: Request, res: Response): Promise<void
 
     const validation = createEventTypeSchema.safeParse(req.body);
     if (!validation.success) {
-      res.status(400).json({ error: validation.error.issues[0]?.message ?? "Invalid input" });
+      res.status(400).json({
+        error: validation.error.issues[0]?.message ?? "Invalid input",
+      });
       return;
     }
 
-    const { name, slug, description, duration } = validation.data;
+    const { name, slug, description, duration, bufferMinutes, customQuestions, } = validation.data;
 
-    // Check slug uniqueness
     const existing = await prisma.eventType.findUnique({
       where: { slug },
     });
@@ -58,11 +66,13 @@ export const createEventType = async (req: Request, res: Response): Promise<void
         slug,
         description,
         duration,
+        bufferMinutes: bufferMinutes ?? 0,
+        customQuestions: customQuestions ?? [],
       },
     });
 
-    res.status(201).json(eventType);
-  } catch (error: any) {
+    res.status(201).json(mapEventTypeResponse(eventType));
+  } catch (error: unknown) {
     console.error("Error creating event type:", error);
     res.status(500).json({ error: "Failed to create event type" });
   }
@@ -81,27 +91,37 @@ export const updateEventType = async (req: Request, res: Response): Promise<void
 
     const validation = createEventTypeSchema.safeParse(req.body);
     if (!validation.success) {
-      res.status(400).json({ error: validation.error.issues[0]?.message ?? "Invalid input" });
+      res.status(400).json({
+        error: validation.error.issues[0]?.message ?? "Invalid input",
+      });
       return;
     }
 
-    const { name, slug, description, duration } = validation.data;
+    const { name, slug, description, duration, bufferMinutes, customQuestions, } = validation.data;
 
     const updated = await prisma.eventType.update({
       where: { id: eventTypeId },
-      data: { name, slug, description, duration },
+      data: {
+        name,
+        slug,
+        description,
+        duration,
+        bufferMinutes: bufferMinutes ?? 0,
+        customQuestions: customQuestions ?? [],
+      },
     });
 
-    res.json(updated);
-  } catch (error: any) {
-    // Prisma Unique Constraint Violation code
-    if (error.code === "P2002" && error.meta?.target?.includes("slug")) {
-      res.status(400).json({ error: "An event type with this URL slug already exists" });
+    res.json(mapEventTypeResponse(updated));
+  } catch (error: unknown) {
+    const prismaError = error as { code?: string; meta?: { target?: string[] } };
+    if (prismaError.code === "P2002" && prismaError.meta?.target?.includes("slug")) {
+      res
+        .status(400)
+        .json({ error: "An event type with this URL slug already exists" });
       return;
     }
 
-    // Prisma Record Not Found code
-    if (error.code === "P2025") {
+    if (prismaError.code === "P2025") {
       res.status(404).json({ error: "Event type not found" });
       return;
     }
@@ -112,7 +132,7 @@ export const updateEventType = async (req: Request, res: Response): Promise<void
 };
 
 // DELETE /api/event-types/:id
-export const deleteEventType = async (req: Request, res: Response): Promise<void> => {
+export const deleteEventType = async (req: Request,res: Response): Promise<void> => {
   try {
     const id = req.params.id as string;
     const eventTypeId = parseInt(id);
@@ -127,9 +147,10 @@ export const deleteEventType = async (req: Request, res: Response): Promise<void
     });
 
     res.json({ message: "Event type deleted successfully" });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error deleting event type:", error);
-    if (error.code === "P2025") {
+    const prismaError = error as { code?: string };
+    if (prismaError.code === "P2025") {
       res.status(404).json({ error: "Event type not found" });
     } else {
       res.status(500).json({ error: "Failed to delete event type" });

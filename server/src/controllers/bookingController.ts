@@ -2,9 +2,10 @@ import { type Request, type Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { generateAvailableSlots } from "../utils/slotGenerator";
 import { TZDate } from "@date-fns/tz";
-import { isBefore, isAfter } from "date-fns";
 import { createBookingSchema } from "../utils/validations";
-
+import { parseCustomQuestions, validateInviteeAnswers, validateBookingDuration, } from "../utils/bookingHelpers";
+import { findHostBookingConflict } from "../utils/conflictCheck";
+import { sendBookingConfirmationEmails, sendEmailSafe } from "../services/emailService";
 
 // GET /api/book/:slug
 export const getPublicEventType = async (req: Request, res: Response): Promise<void> => {
@@ -29,8 +30,11 @@ export const getPublicEventType = async (req: Request, res: Response): Promise<v
       return;
     }
 
-    res.json(eventType);
-  } catch (error: any) {
+    res.json({
+      ...eventType,
+      customQuestions: parseCustomQuestions(eventType.customQuestions),
+    });
+  } catch (error: unknown) {
     console.error("Error fetching public event type:", error);
     res.status(500).json({ error: "Failed to fetch event type details" });
   }
@@ -40,7 +44,7 @@ export const getPublicEventType = async (req: Request, res: Response): Promise<v
 export const getAvailableSlots = async (req: Request, res: Response): Promise<void> => {
   try {
     const slug = req.params.slug as string;
-    const { date, timezone } = req.query; // date: "YYYY-MM-DD", timezone: "America/New_York"
+    const { date, timezone, excludeBookingId } = req.query;
 
     if (!date || typeof date !== "string") {
       res.status(400).json({ error: "Date parameter (YYYY-MM-DD) is required" });
@@ -49,7 +53,6 @@ export const getAvailableSlots = async (req: Request, res: Response): Promise<vo
 
     const inviteeTz = (timezone as string) || "UTC";
 
-    // Fetch Event Type and host admin
     const eventType = await prisma.eventType.findUnique({
       where: { slug },
       include: { user: true },
@@ -61,13 +64,9 @@ export const getAvailableSlots = async (req: Request, res: Response): Promise<vo
     }
 
     const admin = eventType.user;
-
-    // Parse date and find the day of the week in admin's timezone
     const parsedDate = new TZDate(`${date}T00:00:00`, admin.timezone);
+    const dayOfWeek = parsedDate.getDay();
 
-    const dayOfWeek = parsedDate.getDay(); // 0 = Sunday, 6 = Saturday
-
-    // Fetch admin availability for this day of week
     const availability = await prisma.availability.findFirst({
       where: {
         userId: admin.id,
@@ -75,16 +74,24 @@ export const getAvailableSlots = async (req: Request, res: Response): Promise<vo
       },
     });
 
-    // Fetch all active booked meetings on this day
-    // To cover timezone differences safely, we pull bookings within a +/- 24h window
     const targetDateObj = new Date(date);
-    const startOfSearch = new Date(targetDateObj.getTime() - 24 * 60 * 60 * 1000);
-    const endOfSearch = new Date(targetDateObj.getTime() + 48 * 60 * 60 * 1000);
+    const startOfSearch = new Date(
+      targetDateObj.getTime() - 24 * 60 * 60 * 1000
+    );
+    const endOfSearch = new Date(
+      targetDateObj.getTime() + 48 * 60 * 60 * 1000
+    );
+
+    const excludeId =
+      excludeBookingId && typeof excludeBookingId === "string"
+        ? parseInt(excludeBookingId, 10)
+        : undefined;
 
     const bookedMeetings = await prisma.booking.findMany({
       where: {
         eventType: { userId: admin.id },
         status: "BOOKED",
+        ...(excludeId && !isNaN(excludeId) ? { id: { not: excludeId } } : {}),
         startTime: {
           gte: startOfSearch,
           lte: endOfSearch,
@@ -96,22 +103,14 @@ export const getAvailableSlots = async (req: Request, res: Response): Promise<vo
       },
     });
 
-    // Generate slots
-    const slots = generateAvailableSlots(
-      date,
-      eventType.duration,
-      admin.timezone,
-      availability,
-      bookedMeetings,
-      inviteeTz
-    );
+    const slots = generateAvailableSlots(date, eventType.duration, admin.timezone, availability, bookedMeetings, inviteeTz, eventType.bufferMinutes);
 
     res.json({
       date,
       timezone: inviteeTz,
       slots,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error generating available slots:", error);
     res.status(500).json({ error: "Failed to generate available slots" });
   }
@@ -124,21 +123,16 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
 
     const validation = createBookingSchema.safeParse(req.body);
     if (!validation.success) {
-      res.status(400).json({ error: validation.error.issues[0]?.message ?? "Invalid input" });
+      res.status(400).json({
+        error: validation.error.issues[0]?.message ?? "Invalid input",
+      });
       return;
     }
 
-    const { inviteeName, inviteeEmail, startTime, endTime } = validation.data;
+    const { inviteeName, inviteeEmail, startTime, endTime, inviteeAnswers } = validation.data;
     const startUtc = new Date(startTime);
     const endUtc = new Date(endTime);
 
-    // Validate times
-    if (isBefore(endUtc, startUtc) || startUtc.getTime() === endUtc.getTime()) {
-      res.status(400).json({ error: "End time must be after start time" });
-      return;
-    }
-
-    // Fetch Event Type
     const eventType = await prisma.eventType.findUnique({
       where: { slug },
       include: { user: true },
@@ -149,34 +143,55 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // Double-Booking Prevention: Check overlap inside database
-    const conflictingBooking = await prisma.booking.findFirst({
-      where: {
-        eventTypeId: eventType.id,
-        status: "BOOKED",
-        startTime: { lt: endUtc },
-        endTime: { gt: startUtc },
-      },
-    });
+    const durationError = validateBookingDuration(startUtc,  endUtc, eventType.duration);
+    if (durationError) {
+      res.status(400).json({ error: durationError });
+      return;
+    }
 
-    if (conflictingBooking) {
+    const questions = parseCustomQuestions(eventType.customQuestions);
+    const answersError = validateInviteeAnswers(questions, inviteeAnswers);
+    if (answersError) {
+      res.status(400).json({ error: answersError });
+      return;
+    }
+
+    const hasConflict = await findHostBookingConflict(eventType.user.id, startUtc, endUtc, eventType.bufferMinutes);
+
+    if (hasConflict) {
       res.status(400).json({
-        error: "Double-booking conflict! This time slot has already been reserved.",
+        error:
+          "Double-booking conflict! This time slot has already been reserved.",
       });
       return;
     }
 
-    // Create the booking
     const booking = await prisma.booking.create({
       data: {
         eventTypeId: eventType.id,
         inviteeName,
         inviteeEmail,
+        inviteeAnswers: inviteeAnswers ?? undefined,
         startTime: startUtc,
         endTime: endUtc,
         status: "BOOKED",
       },
     });
+
+    sendEmailSafe(
+      sendBookingConfirmationEmails({
+        inviteeName,
+        inviteeEmail,
+        hostName: eventType.user.name ?? "Host",
+        hostEmail: eventType.user.email,
+        eventName: eventType.name,
+        startTime: startUtc.toISOString(),
+        endTime: endUtc.toISOString(),
+        duration: eventType.duration,
+        hostTimezone: eventType.user.timezone,
+        slug: eventType.slug,
+      })
+    );
 
     res.status(201).json({
       message: "Meeting booked successfully!",
@@ -187,11 +202,13 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         duration: eventType.duration,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error creating booking:", error);
-    if (error.code === "P2002") {
+    const prismaError = error as { code?: string };
+    if (prismaError.code === "P2002") {
       res.status(400).json({
-        error: "Double-booking conflict! A booking with this start time already exists.",
+        error:
+          "Double-booking conflict! A booking with this start time already exists.",
       });
     } else {
       res.status(500).json({ error: "Failed to create booking" });

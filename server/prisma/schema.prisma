@@ -20,15 +20,17 @@ model User {
 }
 
 model EventType {
-  id          Int       @id @default(autoincrement())
-  userId      Int
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name        String
-  slug        String    @unique
-  description String?
-  duration    Int       // in minutes
-  createdAt   DateTime  @default(now())
-  bookings    Booking[]
+  id              Int       @id @default(autoincrement())
+  userId          Int
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  slug            String    @unique
+  description     String?
+  duration        Int       // in minutes
+  bufferMinutes   Int       @default(0)
+  customQuestions Json      @default("[]")
+  createdAt       DateTime  @default(now())
+  bookings        Booking[]
 }
 
 model Availability {
@@ -46,6 +48,7 @@ model Booking {
   eventType          EventType @relation(fields: [eventTypeId], references: [id], onDelete: Cascade)
   inviteeName        String
   inviteeEmail       String
+  inviteeAnswers     Json?
   startTime          DateTime  // UTC
   endTime            DateTime  // UTC
   status             String    @default("BOOKED") // "BOOKED" or "CANCELLED"

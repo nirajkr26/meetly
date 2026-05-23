@@ -22,6 +22,8 @@ Create a `.env` file in the root of the `server/` directory:
 DATABASE_URL="postgresql://<username>:<password>@<host>/neondb?sslmode=require"
 PORT=5001
 FRONTEND_URL="http://localhost:3000"
+RESEND_API_KEY="re_xxxxxxxx"
+RESEND_FROM_EMAIL="Meetly <onboarding@resend.dev>"
 ```
 
 ### 2. Install Dependencies
@@ -74,3 +76,14 @@ bun --hot src/index.ts
 ### Meetings Dashboard (Admin)
 * **`GET /api/meetings`**: Retrieve a list of all meetings (split into Upcoming and Past).
 * **`PATCH /api/meetings/:id/cancel`**: Cancel an existing meeting and release the time slot.
+* **`PATCH /api/meetings/:id/reschedule`**: Reschedule a meeting (`startTime`, `endTime`); sends notification emails.
+
+### Email notifications (Resend)
+
+When `RESEND_API_KEY` and `RESEND_FROM_EMAIL` are set, emails are sent on:
+
+* New booking (invitee + host)
+* Cancellation (invitee + host)
+* Reschedule (invitee + host)
+
+Emails are sent asynchronously; API responses are not blocked if email fails.
