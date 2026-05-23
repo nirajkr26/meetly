@@ -58,7 +58,7 @@ erDiagram
     User {
         Int id PK
         String email UK
-        String name
+        String name?
         String timezone
         DateTime createdAt
     }
@@ -69,7 +69,9 @@ erDiagram
         String name
         String slug UK
         Int duration
-        String description
+        String? description
+        Int bufferMinutes
+        Json customQuestions
         DateTime createdAt
     }
 
@@ -86,10 +88,11 @@ erDiagram
         Int eventTypeId FK
         String inviteeName
         String inviteeEmail
+        Json? inviteeAnswers
         DateTime startTime
         DateTime endTime
         String status
-        String cancellationReason
+        String? cancellationReason
         DateTime createdAt
     }
 ```
